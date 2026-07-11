@@ -174,3 +174,21 @@ def test_atlas_rerank_reorders_by_relevance():
     ranked = utils.atlas_rerank("query", docs, api_key="k", top_n=2, poster=poster)
     assert ranked == ["doc2", "doc0"]
     assert poster.calls[0]["json"]["query"] == "query"
+
+
+def test_atlas_rerank_default_top_n_returns_all():
+    docs = ["doc0", "doc1", "doc2"]
+    poster = FakeRerankPoster(order=[2, 0, 1])
+    ranked = utils.atlas_rerank("query", docs, api_key="k", poster=poster)
+    assert ranked == ["doc2", "doc0", "doc1"]
+    # top_k defaults to the full document count when top_n is unset.
+    assert poster.calls[0]["json"]["top_k"] == 3
+
+
+def test_atlas_rerank_top_n_zero_is_not_treated_as_all():
+    # A falsy-but-explicit top_n=0 must mean "zero", not "all documents".
+    docs = ["doc0", "doc1", "doc2"]
+    poster = FakeRerankPoster(order=[2, 0, 1])
+    ranked = utils.atlas_rerank("query", docs, api_key="k", top_n=0, poster=poster)
+    assert ranked == []
+    assert poster.calls[0]["json"]["top_k"] == 0

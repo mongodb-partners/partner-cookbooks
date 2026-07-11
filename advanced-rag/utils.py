@@ -190,7 +190,7 @@ def atlas_rerank(
             "model": model,
             "query": query,
             "documents": documents,
-            "top_k": top_n or len(documents),
+            "top_k": top_n if top_n is not None else len(documents),
         },
         timeout=timeout,
     )
@@ -200,7 +200,7 @@ def atlas_rerank(
         )
     results = sorted(resp.json()["data"], key=lambda r: r["relevance_score"], reverse=True)
     ordered = [documents[r["index"]] for r in results]
-    return ordered[: top_n] if top_n else ordered
+    return ordered[:top_n] if top_n is not None else ordered
 
 
 # --------------------------------------------------------------------------
