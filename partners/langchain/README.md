@@ -40,8 +40,12 @@ Or click the **Open in Colab** badge at the top of any notebook and skip the ins
 An M0 cluster allows three Atlas Search indexes, and these notebooks are built to fit.
 Notebook 1 of Advanced RAG creates `movies_vector_index`, notebook 2 creates
 `movies_fulltext_index`, and notebook 3 creates a short-lived index for the auto-embedding
-demo that it drops when it finishes. The Mastra set in this repository reuses the first two
-rather than creating its own.
+demo that it drops when it finishes. Each creation is guarded by an existence check, so
+re-running is free.
+
+The Mastra set uses the same two index names and also creates them if absent. The two sets
+are independent — run either first — and sharing the names is what keeps the pair inside the
+M0 budget. On a paid tier the limit is not binding.
 
 If you hit a "maximum number of indexes" error, look for leftovers from an interrupted run:
 the `auto_embed_demo` collection, or a demo index that outlived its notebook.

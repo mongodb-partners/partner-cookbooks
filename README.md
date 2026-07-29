@@ -12,8 +12,10 @@ developers new to the topic.
 | [Mastra](./partners/mastra/) | Retrieval, BYO collections, hybrid search, agents with memory (4 notebooks) | TypeScript | No, needs a local clone |
 
 Every set uses the Atlas `sample_mflix` dataset, so you load data once and reuse it
-throughout. The Mastra notebooks reuse the two search indexes the LangChain set creates,
-which matters on the free tier: M0 allows three, and eight notebooks share them.
+throughout. **Each set is independent — start with whichever one you want.** Both create the
+Atlas Search indexes they need and skip creation if they already exist, and both use the
+same index names on purpose: M0 allows three search indexes, so sharing names is what lets
+eight notebooks fit on a free cluster. On a paid tier that limit does not apply.
 
 All notebook outputs are committed. You can read what any of this returns before running
 anything yourself.

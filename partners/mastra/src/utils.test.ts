@@ -16,12 +16,21 @@ import {
   ATLAS_AI_BASE_URL,
   APP_NAME,
   EmbeddingDimensionMismatch,
+  MFLIX_FULLTEXT_INDEX,
+  MFLIX_VECTOR_INDEX,
   MissingSecretError,
+  REVIEWS_COLLECTION,
   SAMPLE_MFLIX_DIMENSIONS,
+  ScratchCollectionExists,
+  SearchIndexBudgetExceeded,
   atlasRerank,
   buildAnthropicModel,
+  claimScratchCollection,
   createAtlasEmbedder,
+  ensureFullTextSearchIndex,
+  ensureVectorSearchIndex,
   getSecret,
+  listAllSearchIndexes,
   stripMessagesPath,
 } from './utils.js';
 
@@ -324,6 +333,306 @@ describe('atlasRerank', () => {
 describe('APP_NAME', () => {
   it('follows the devrel.partner.<set>.<language> convention', () => {
     expect(APP_NAME).toBe('devrel.partner.mastra.typescript');
+  });
+});
+
+// --------------------------------------------------------------------------
+// Search index setup. These are what make the set independently runnable: on a
+// clean cluster the notebooks create their own indexes instead of assuming the
+// LangChain set already did.
+// --------------------------------------------------------------------------
+/** A collection stand-in. Records created indexes, reports them queryable after N polls. */
+function fakeIndexCollection(
+  opts: { existing?: string[]; queryableAfter?: number } = {},
+) {
+  const existing = new Set(opts.existing ?? []);
+  const queryableAfter = opts.queryableAfter ?? 1;
+  const created: any[] = [];
+  const polls: string[] = [];
+  return {
+    created,
+    polls,
+    listSearchIndexes(name?: string) {
+      return {
+        toArray: async () => {
+          if (name === undefined) return [...existing].map((n) => ({ name: n }));
+          polls.push(name);
+          const seen = polls.filter((p) => p === name).length;
+          if (!existing.has(name)) return [];
+          return [{ name, status: seen >= queryableAfter ? 'READY' : 'BUILDING', queryable: seen >= queryableAfter }];
+        },
+      };
+    },
+    async createSearchIndex(description: any) {
+      created.push(description);
+      existing.add(description.name);
+      return description.name;
+    },
+  };
+}
+
+const silent = { log: () => {}, sleep: async () => {}, pollSeconds: 1 };
+
+describe('ensureVectorSearchIndex', () => {
+  it('creates the index when the collection has none', async () => {
+    const collection = fakeIndexCollection();
+    const name = await ensureVectorSearchIndex(
+      collection,
+      {
+        indexName: MFLIX_VECTOR_INDEX,
+        path: 'plot_embedding_voyage_3_large',
+        dimensions: SAMPLE_MFLIX_DIMENSIONS,
+        filterPaths: ['genres', 'year'],
+      },
+      silent,
+    );
+
+    expect(name).toBe(MFLIX_VECTOR_INDEX);
+    expect(collection.created).toHaveLength(1);
+    expect(collection.created[0].type).toBe('vectorSearch');
+    const fields = collection.created[0].definition.fields;
+    expect(fields[0]).toMatchObject({
+      type: 'vector',
+      path: 'plot_embedding_voyage_3_large',
+      numDimensions: SAMPLE_MFLIX_DIMENSIONS,
+      similarity: 'cosine',
+    });
+    // The filter fields have to match what Mastra later declares as filterFields,
+    // or a pushdown filter silently falls back to the pre-filter path.
+    expect(fields.slice(1)).toEqual([
+      { type: 'filter', path: 'genres' },
+      { type: 'filter', path: 'year' },
+    ]);
+  });
+
+  it('is a no-op when the index already exists', async () => {
+    // The LangChain-ran-first case, and equally the notebook-re-run case.
+    const collection = fakeIndexCollection({ existing: [MFLIX_VECTOR_INDEX] });
+    const name = await ensureVectorSearchIndex(
+      collection,
+      { indexName: MFLIX_VECTOR_INDEX, path: 'plot_embedding_voyage_3_large', dimensions: 2048 },
+      silent,
+    );
+
+    expect(name).toBe(MFLIX_VECTOR_INDEX);
+    expect(collection.created).toHaveLength(0);
+  });
+
+  it('leaves an existing index alone even when the definition would differ', async () => {
+    // Rebuilding an index another notebook created would be a worse surprise
+    // than a mismatch, so existing always wins.
+    const collection = fakeIndexCollection({ existing: [MFLIX_VECTOR_INDEX] });
+    await ensureVectorSearchIndex(
+      collection,
+      { indexName: MFLIX_VECTOR_INDEX, path: 'some_other_field', dimensions: 1024 },
+      silent,
+    );
+
+    expect(collection.created).toHaveLength(0);
+  });
+
+  it('polls until the new index reports queryable', async () => {
+    const collection = fakeIndexCollection({ queryableAfter: 3 });
+    await ensureVectorSearchIndex(
+      collection,
+      { indexName: MFLIX_VECTOR_INDEX, path: 'plot', dimensions: 2048 },
+      silent,
+    );
+
+    expect(collection.polls.length).toBe(3);
+  });
+
+  it('throws a diagnosable error when the index never becomes queryable', async () => {
+    const collection = fakeIndexCollection({ queryableAfter: Number.MAX_SAFE_INTEGER });
+    await expect(
+      ensureVectorSearchIndex(
+        collection,
+        { indexName: MFLIX_VECTOR_INDEX, path: 'plot', dimensions: 2048 },
+        { ...silent, timeoutSeconds: 3 },
+      ),
+    ).rejects.toThrow(/did not become queryable within 3s/);
+  });
+});
+
+describe('ensureFullTextSearchIndex', () => {
+  it('creates a static string mapping matching the LangChain set', async () => {
+    const collection = fakeIndexCollection();
+    const name = await ensureFullTextSearchIndex(
+      collection,
+      { indexName: MFLIX_FULLTEXT_INDEX, fields: ['plot'] },
+      silent,
+    );
+
+    expect(name).toBe(MFLIX_FULLTEXT_INDEX);
+    expect(collection.created[0].type).toBe('search');
+    expect(collection.created[0].definition.mappings).toEqual({
+      dynamic: false,
+      fields: { plot: { type: 'string' } },
+    });
+  });
+
+  it('is a no-op when the index already exists', async () => {
+    const collection = fakeIndexCollection({ existing: [MFLIX_FULLTEXT_INDEX] });
+    await ensureFullTextSearchIndex(
+      collection,
+      { indexName: MFLIX_FULLTEXT_INDEX, fields: ['plot'] },
+      silent,
+    );
+
+    expect(collection.created).toHaveLength(0);
+  });
+});
+
+/** A `Db` stand-in built from a `{ collection: [indexNames] }` map. */
+function fakeDb(layout: Record<string, string[]>) {
+  const collections = new Map(Object.entries(layout));
+  return {
+    listCollections() {
+      return { toArray: async () => [...collections.keys()].map((name) => ({ name })) };
+    },
+    collection(name: string) {
+      return {
+        listSearchIndexes(indexName?: string) {
+          const names = collections.get(name) ?? [];
+          // Report anything present as immediately queryable, so the create path's
+          // poll loop resolves on its first attempt.
+          const rows = names.map((n) => ({ name: n, status: 'READY', queryable: true }));
+          return {
+            toArray: async () =>
+              indexName === undefined ? rows : rows.filter((row) => row.name === indexName),
+          };
+        },
+        async createSearchIndex(description: any) {
+          collections.set(name, [...(collections.get(name) ?? []), description.name]);
+          return description.name;
+        },
+      };
+    },
+  };
+}
+
+describe('search index budget', () => {
+  const atLimit = {
+    embedded_movies: ['movies_vector_index', 'movies_fulltext_index'],
+    other_collection: ['someones_own_index'],
+  };
+
+  it('refuses to create a fourth index and names what is already there', async () => {
+    const db = fakeDb(atLimit);
+    await expect(
+      ensureVectorSearchIndex(
+        db.collection('embedded_movies'),
+        { indexName: 'a_fourth_index', path: 'vec', dimensions: 8 },
+        { ...silent, db },
+      ),
+    ).rejects.toThrow(SearchIndexBudgetExceeded);
+  });
+
+  it('tells the reader how to proceed without deleting anything for them', async () => {
+    const db = fakeDb(atLimit);
+    const error: Error = await ensureVectorSearchIndex(
+      db.collection('embedded_movies'),
+      { indexName: 'a_fourth_index', path: 'vec', dimensions: 8 },
+      { ...silent, db },
+    ).then(
+      () => {
+        throw new Error('expected the budget preflight to reject');
+      },
+      (e: unknown) => e as Error,
+    );
+
+    expect(error.message).toContain('fresh Atlas cluster');
+    expect(error.message).toContain('will not delete indexes it did not create');
+    // The inventory has to name the offenders, or "at the limit" is unactionable.
+    expect(error.message).toContain('someones_own_index');
+    expect(error.message).toContain('movies_vector_index');
+  });
+
+  it('does not trip when the wanted index is one of the ones already there', async () => {
+    // At the limit, but we want an index that exists -- no creation, so no problem.
+    const db = fakeDb(atLimit);
+    const name = await ensureVectorSearchIndex(
+      db.collection('embedded_movies'),
+      { indexName: MFLIX_VECTOR_INDEX, path: 'vec', dimensions: 8 },
+      { ...silent, db },
+    );
+    expect(name).toBe(MFLIX_VECTOR_INDEX);
+  });
+
+  it('allows creation when there is room', async () => {
+    const db = fakeDb({ embedded_movies: ['movies_vector_index'] });
+    await ensureFullTextSearchIndex(
+      db.collection('embedded_movies'),
+      { indexName: MFLIX_FULLTEXT_INDEX, fields: ['plot'] },
+      { ...silent, db },
+    );
+    expect(await listAllSearchIndexes(db)).toHaveLength(2);
+  });
+
+  it('honours a raised limit, for readers on a paid tier', async () => {
+    const db = fakeDb(atLimit);
+    await ensureVectorSearchIndex(
+      db.collection('embedded_movies'),
+      { indexName: 'a_fourth_index', path: 'vec', dimensions: 8 },
+      { ...silent, db, indexLimit: 10 },
+    );
+    expect(await listAllSearchIndexes(db)).toHaveLength(4);
+  });
+
+  it('skips the preflight when no db is passed', async () => {
+    // Back-compat: without a db we cannot count, so Atlas reports the problem instead.
+    const collection = fakeIndexCollection();
+    await ensureVectorSearchIndex(
+      collection,
+      { indexName: 'unchecked', path: 'vec', dimensions: 8 },
+      silent,
+    );
+    expect(collection.created).toHaveLength(1);
+  });
+});
+
+describe('claimScratchCollection', () => {
+  it('returns the name when the collection does not exist', async () => {
+    const db = fakeDb({ embedded_movies: [] });
+    expect(await claimScratchCollection(db, REVIEWS_COLLECTION)).toBe(REVIEWS_COLLECTION);
+  });
+
+  it('refuses a collection it did not create, rather than dropping it', async () => {
+    // The whole point: this used to be an unconditional drop() of `movie_reviews`,
+    // which would have destroyed a reader's data if they happened to own that name.
+    const db = fakeDb({ [REVIEWS_COLLECTION]: [] });
+    await expect(claimScratchCollection(db, REVIEWS_COLLECTION)).rejects.toThrow(
+      ScratchCollectionExists,
+    );
+  });
+
+  it('explains both the leftover case and the your-data case', async () => {
+    const db = fakeDb({ [REVIEWS_COLLECTION]: [] });
+    const error: Error = await claimScratchCollection(db, REVIEWS_COLLECTION).then(
+      () => {
+        throw new Error('expected claimScratchCollection to reject');
+      },
+      (e: unknown) => e as Error,
+    );
+    expect(error.message).toContain('will not reuse or overwrite one it did not create');
+    expect(error.message).toContain('MASTRA_REVIEWS_COLLECTION');
+  });
+
+  it('is not named for real-looking data', () => {
+    // `movie_reviews` is a name a reader could plausibly already have; a
+    // cookbook-prefixed name is not.
+    expect(REVIEWS_COLLECTION).toBe('mastra_cookbook_reviews');
+    expect(REVIEWS_COLLECTION).not.toBe('movie_reviews');
+  });
+});
+
+describe('shared index names', () => {
+  it('match the names the LangChain notebooks use', () => {
+    // Both sets create-if-absent under these names, which is what keeps three
+    // indexes enough for eight notebooks on a free M0 cluster. Renaming either
+    // here without renaming it there breaks the M0 budget, not correctness.
+    expect(MFLIX_VECTOR_INDEX).toBe('movies_vector_index');
+    expect(MFLIX_FULLTEXT_INDEX).toBe('movies_fulltext_index');
   });
 });
 

@@ -15,7 +15,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-import { MissingSecretError, SAMPLE_MFLIX_DIMENSIONS } from './utils.js';
+import { MissingSecretError, REVIEWS_COLLECTION, SAMPLE_MFLIX_DIMENSIONS } from './utils.js';
 
 /** Values a notebook needs, resolved and validated. */
 export interface NotebookConfig {
@@ -28,6 +28,13 @@ export interface NotebookConfig {
   anthropicModel: string;
   /** Set only when routing Claude through an Anthropic-compatible gateway. */
   anthropicBaseUrl: string | undefined;
+  /**
+   * Name notebook 02 uses for the scratch collection it creates and drops.
+   *
+   * Overridable because the notebook refuses to touch a collection that already exists,
+   * and a reader who happens to have this name in use needs a way out.
+   */
+  reviewsCollection: string;
   /** A one-line, secret-free confirmation the notebooks print and commit. */
   summary: string;
 }
@@ -121,6 +128,7 @@ export function loadNotebookConfig(
   const dbName = setting('MONGODB_DB', 'sample_mflix');
   const anthropicModel = setting('ANTHROPIC_MODEL', 'claude-haiku-4-5');
   const anthropicBaseUrl = file['ANTHROPIC_BASE_URL'];
+  const reviewsCollection = setting('MASTRA_REVIEWS_COLLECTION', REVIEWS_COLLECTION);
 
   return {
     mongodbUri: secret('MONGODB_URI'),
@@ -131,6 +139,7 @@ export function loadNotebookConfig(
     embeddingDimensions,
     anthropicModel,
     anthropicBaseUrl,
+    reviewsCollection,
     // Deliberately excludes the connection string and every key: notebooks print this
     // line and commit the output to a public repository.
     summary:

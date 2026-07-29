@@ -16,8 +16,9 @@
  *
  * 1. `deleteIndex` on a BYO registration DROPS the Atlas search index the registration
  *    points at. Pointing a BYO index at `movies_vector_index` and then deleting the
- *    registration therefore destroys the shared index the LangChain notebooks created.
- *    So the BYO registration here is never deleted -- only its registry row is cleared.
+ *    registration therefore destroys the index the notebooks (and the LangChain set,
+ *    which uses the same name) rely on. So the BYO registration here is never deleted --
+ *    only its registry row is cleared.
  *
  * 2. A managed `createIndex` provisions TWO Atlas Search indexes: the vectorSearch one
  *    and a companion dynamic full-text one. On an M0 (3-index limit) with the two
@@ -34,7 +35,17 @@ import { MongoClient } from 'mongodb';
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 
-import { APP_NAME, atlasRerank, buildAnthropicModel, createAtlasEmbedder, getSecret } from '../src/utils.js';
+import {
+  APP_NAME,
+  MFLIX_FULLTEXT_INDEX,
+  MFLIX_VECTOR_INDEX,
+  atlasRerank,
+  buildAnthropicModel,
+  createAtlasEmbedder,
+  ensureFullTextSearchIndex,
+  ensureVectorSearchIndex,
+  getSecret,
+} from '../src/utils.js';
 
 const REPO_ROOT = resolve(import.meta.dirname, '../../..');
 
@@ -157,15 +168,33 @@ await step('embed a query via ai.mongodb.com', async () => {
   return `${queryVector.length}-d vector, first value ${queryVector[0]!.toFixed(4)}`;
 });
 
-// 2. Driver boundary: $vectorSearch against the pre-existing sample_mflix index,
-//    registered as a bring-your-own collection.
+// 1b. The two Atlas indexes the notebooks query, created if this is a clean cluster.
+//     Same create-if-absent path the notebooks take, so a smoke run proves that path
+//     too rather than assuming someone else built the indexes first.
+await step('ensure the sample_mflix search indexes exist', async () => {
+  const movies = rawClient.db(DB_NAME).collection('embedded_movies');
+  await ensureVectorSearchIndex(movies, {
+    indexName: MFLIX_VECTOR_INDEX,
+    path: 'plot_embedding_voyage_3_large',
+    dimensions: queryVector.length,
+    filterPaths: ['genres', 'year'],
+  });
+  await ensureFullTextSearchIndex(movies, {
+    indexName: MFLIX_FULLTEXT_INDEX,
+    fields: ['plot'],
+  });
+  return `${MFLIX_VECTOR_INDEX} and ${MFLIX_FULLTEXT_INDEX} queryable`;
+});
+
+// 2. Driver boundary: $vectorSearch against the sample_mflix index, registered as a
+//    bring-your-own collection.
 await step('BYO vector search over sample_mflix.embedded_movies', async () => {
   await vector.createIndex({
     indexName: BYO_INDEX,
     dimension: queryVector.length,
     metric: 'cosine',
     collectionName: 'embedded_movies',
-    searchIndexName: 'movies_vector_index',
+    searchIndexName: MFLIX_VECTOR_INDEX,
     filterFields: ['genres', 'year'],
   });
   const results = await vector.query({
@@ -187,9 +216,9 @@ await step('full-text search via textQuery', async () => {
     paths: ['plot'],
     topK: 3,
     metadataMode: 'document',
-    searchIndexName: 'movies_fulltext_index',
+    searchIndexName: MFLIX_FULLTEXT_INDEX,
   });
-  if (results.length === 0) throw new Error('no results -- is movies_fulltext_index READY?');
+  if (results.length === 0) throw new Error(`no results -- is ${MFLIX_FULLTEXT_INDEX} READY?`);
   return `top 3: ${results.map((r) => (r.metadata as { title?: string }).title).join(', ')}`;
 });
 
@@ -203,7 +232,7 @@ await step('hybrid search via $rankFusion', async () => {
     paths: ['plot'],
     topK: 3,
     metadataMode: 'document',
-    textSearchIndexName: 'movies_fulltext_index',
+    textSearchIndexName: MFLIX_FULLTEXT_INDEX,
   });
   if (results.length === 0) throw new Error('no results from $rankFusion');
   return `top 3: ${results.map((r) => (r.metadata as { title?: string }).title).join(', ')}`;

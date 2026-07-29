@@ -11,18 +11,21 @@ these notebooks do not open in Colab. You need a local clone and `npm install`.
 
 ## The notebooks
 
-Run them in order. Each one builds on indexes and ideas from the last.
+Reading them in order is best -- each builds on ideas from the last -- but each one
+creates the Atlas indexes it needs, so any of them runs on a clean cluster.
 
 | # | Notebook | Covers | Runtime |
 |---|----------|--------|---------|
-| 1 | [Setup, Voyage Embeddings & Vector Search](./01_setup_voyage_and_vector_search.ipynb) | `MongoDBVector`, Voyage embeddings three ways, `$vectorSearch`, filter pushdown | 31s |
-| 2 | [Bring Your Own Operational Collections](./02_byo_operational_collections.ipynb) | Querying a collection Mastra did not create, the read-only guard, `allowWrites`, the index registry | 65s |
-| 3 | [Full-Text, Hybrid Search & Reranking](./03_hybrid_search_and_reranking.ipynb) | `textQuery` (BM25), `hybridQuery` (`$rankFusion`), weights, `rerank-2.5` | 18s |
-| 4 | [Agents, Tools & Persistent Memory](./04_agent_with_tools_and_memory.ipynb) | `createTool`, tool selection, `Memory` on `MongoDBStore`, proving persistence | 55s |
+| 1 | [Setup, Voyage Embeddings & Vector Search](./01_setup_voyage_and_vector_search.ipynb) | `MongoDBVector`, Voyage embeddings three ways, `$vectorSearch`, filter pushdown | 25s |
+| 2 | [Bring Your Own Operational Collections](./02_byo_operational_collections.ipynb) | Querying a collection Mastra did not create, the read-only guard, `allowWrites`, the index registry | 63s |
+| 3 | [Full-Text, Hybrid Search & Reranking](./03_hybrid_search_and_reranking.ipynb) | `textQuery` (BM25), `hybridQuery` (`$rankFusion`), weights, `rerank-2.5` | 20s |
+| 4 | [Agents, Tools & Persistent Memory](./04_agent_with_tools_and_memory.ipynb) | `createTool`, tool selection, `Memory` on `MongoDBStore`, proving persistence | 58s |
 
-Runtime is wall-clock for a full `nbconvert --execute` run against a live M0 cluster, which
-is a floor rather than an estimate of your time. Notebook 02 is the slowest because it
-creates an Atlas Search index and waits for it to become queryable.
+Runtime is wall-clock for a full `nbconvert --execute` run against a live M0 cluster with
+the shared indexes already built, which is a floor rather than an estimate of your time.
+Notebook 02 is the slowest because it always creates an Atlas Search index and waits for
+it to become queryable. On a genuinely clean cluster add a minute or two to whichever
+notebook you run first, since it builds the shared indexes the others then find.
 
 Every notebook here has its outputs committed, so you can read what these actually return
 before running anything yourself.
@@ -90,26 +93,44 @@ parent: `sharp` to 0.35.3 and `adm-zip` to 0.6.0. `@huggingface/transformers` an
 `onnxruntime-node` still declare the vulnerable ranges, and both packages load and run
 correctly against the overridden versions.
 
-## The M0 index budget
+## Search indexes, and the M0 budget
 
-A free cluster allows **three** Atlas Search indexes, and this set spends all three.
+This set creates the Atlas Search indexes it needs, and skips creation if it finds them
+already there. **No other notebook has to run first** — start at 01 on a clean cluster and
+it will build what it needs. `sample_mflix` ships plot *vectors*, not indexes over them,
+so somebody has to do it.
 
-Two come from `sample_mflix` and are shared with the LangChain notebooks:
-`movies_vector_index` and `movies_fulltext_index`. Notebook 02 creates the third on its own
-`movie_reviews` collection and drops it during cleanup.
+Three indexes, which is exactly what a free M0 cluster allows:
+
+| Index | Collection | Created by |
+|-------|-----------|-----------|
+| `movies_vector_index` | `embedded_movies` | notebook 01, if absent |
+| `movies_fulltext_index` | `embedded_movies` | notebook 03, if absent |
+| `mastra_cookbook_reviews_vector_index` | `mastra_cookbook_reviews` | notebook 02, dropped in its cleanup |
+
+The first two use the same names as the LangChain notebooks in this repository, and both
+sets create-if-absent. That is deliberate and it is what makes eight notebooks fit in three
+slots: whichever set you run first builds them, and the other finds them. Neither set
+depends on the other having run. **On a paid tier none of this is binding** — the budget is
+an M0 constraint, not a property of the notebooks.
 
 Two consequences worth knowing before you deviate from the happy path:
 
 - **A managed `createIndex` costs two slots**, not one, because Mastra provisions a
   companion full-text index alongside the vector one. There is no room for that here, which
-  is why every notebook registers existing indexes instead of provisioning new ones.
+  is why the notebooks register indexes they created via the driver instead of letting
+  Mastra provision them.
 - **`deleteIndex` on a bring-your-own registration drops the underlying Atlas index.** The
   collection survives; the index does not. Notebook 01 explains this and deliberately does
   not call it, because doing so would destroy `movies_vector_index` for every other notebook
-  in the repository.
+  in the repository. A later run would rebuild it, but slowly.
 
-If `createSearchIndex` reports an index limit, drop the `movie_reviews` collection left
-behind by an interrupted notebook 02 run.
+If an index limit is reported, the notebooks stop and list what is occupying the slots
+rather than freeing one. That is deliberate: an index they did not create could be behind
+something you depend on. The safe leftovers to drop yourself are notebook 02's
+`mastra_cookbook_reviews` collection and its index, from an interrupted run. Notebook 02's
+scratch collection name is settable with `MASTRA_REVIEWS_COLLECTION` if that name is
+already taken on your cluster -- it refuses to reuse a collection it did not create.
 
 ## Shared helpers
 
@@ -127,7 +148,7 @@ notebooks where you can read it.
 ## Verifying it
 
 ```bash
-npm test            # 63 offline unit tests, plus a credential scan of every notebook output
+npm test            # 84 offline unit tests, plus a credential scan of every notebook output
 npm run typecheck   # tsc --noEmit over src/ and scripts/
 npm run smoke       # 8 steps against real Atlas, real Voyage, real Claude
 ```

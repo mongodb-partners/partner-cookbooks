@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { loadNotebookConfig, parseEnv } from './config.js';
+import { REVIEWS_COLLECTION } from './utils.js';
 
 /** Write a .env into a throwaway directory and return the file path. */
 function envFile(contents: string): string {
@@ -101,6 +102,20 @@ describe('loadNotebookConfig', () => {
     expect(config.embeddingDimensions).toBe(2048);
     expect(config.anthropicModel).toBe('claude-haiku-4-5');
     expect(config.anthropicBaseUrl).toBeUndefined();
+    expect(config.reviewsCollection).toBe(REVIEWS_COLLECTION);
+  });
+
+  it('lets the .env rename notebook 02 scratch collection', () => {
+    // The escape hatch for a reader who already has a collection by the default name.
+    // Notebook 02 refuses to reuse one it did not create, so without this the notebook
+    // would be unrunnable for them.
+    const path = envFile(
+      `MONGODB_URI=${uri}\nMDB_ATLAS_API_KEY=k\nANTHROPIC_API_KEY=k\n` +
+        `MASTRA_REVIEWS_COLLECTION=cookbook_scratch_42\n`,
+    );
+    const config = loadNotebookConfig({ envPath: path, env: {} });
+
+    expect(config.reviewsCollection).toBe('cookbook_scratch_42');
   });
 
   it('lets the .env override a default', () => {

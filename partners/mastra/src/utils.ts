@@ -289,3 +289,295 @@ export async function connect(
   await client.db('admin').command({ ping: 1 });
   return { client, db: (name: string) => client.db(name) };
 }
+
+// --------------------------------------------------------------------------
+// Atlas Search indexes: create if absent, then wait until queryable.
+// --------------------------------------------------------------------------
+/**
+ * The Atlas Search indexes this set queries on `sample_mflix.embedded_movies`.
+ *
+ * These names are shared with the LangChain notebooks in this repository *by
+ * convention, not by dependency*. Either set can run first on a clean cluster: whoever
+ * gets there creates the index, and the other finds it and moves on. That is the whole
+ * point of the `ensure*` helpers below -- a notebook set that assumed another partner's
+ * notebooks had already run was an ordering bug, not a feature.
+ *
+ * Reusing the names is still what keeps a free M0 cluster viable. M0 allows three search
+ * indexes; these two plus notebook 02's scratch-collection index is exactly three.
+ * Give each set its own names and the pair no longer fits.
+ */
+export const MFLIX_VECTOR_INDEX = 'movies_vector_index';
+export const MFLIX_FULLTEXT_INDEX = 'movies_fulltext_index';
+
+/** A search index as `listSearchIndexes` actually returns it. */
+interface SearchIndexInfo {
+  name: string;
+  status?: string;
+  queryable?: boolean;
+}
+
+/** Minimal surface of a driver collection, so the unit tests can pass a fake. */
+export interface SearchIndexCollection {
+  listSearchIndexes(name?: string): { toArray(): Promise<unknown[]> };
+  createSearchIndex(description: unknown): Promise<unknown>;
+}
+
+/** Atlas Search index limit on the free M0 tier. Paid tiers allow more. */
+export const M0_SEARCH_INDEX_LIMIT = 3;
+
+/**
+ * Raised when creating an index would exceed the cluster's search index limit.
+ *
+ * The message names what is already there and what the reader can do about it. It
+ * deliberately stops rather than freeing a slot: an index this code did not create
+ * belongs to the reader, and deleting one to make room could destroy the index behind
+ * somebody's application. Asking for a fresh cluster is the safe failure.
+ */
+export class SearchIndexBudgetExceeded extends Error {
+  constructor(
+    wanted: string,
+    existing: Array<{ collection: string; index: string }>,
+    limit: number,
+  ) {
+    const inventory = existing
+      .map(({ collection, index }) => `  ${collection}: ${index}`)
+      .join('\n');
+    super(
+      `Cannot create "${wanted}": this cluster already has ${existing.length} Atlas Search ` +
+        `index(es), which is the limit${limit === M0_SEARCH_INDEX_LIMIT ? ' on a free M0 tier' : ''}:\n` +
+        `${inventory}\n\n` +
+        `Use a fresh Atlas cluster, upgrade the tier, or drop an index you no longer need ` +
+        `from the Atlas UI. This notebook will not delete indexes it did not create.\n` +
+        `If a previous run of this cookbook was interrupted, the leftover is most likely an ` +
+        `index on a scratch collection (a "*_reviews" or "auto_embed_demo" collection) -- ` +
+        `those are safe for you to remove.`,
+    );
+    this.name = 'SearchIndexBudgetExceeded';
+  }
+}
+
+export interface EnsureIndexOptions {
+  /** Seconds to wait for a newly created index to become queryable. */
+  timeoutSeconds?: number;
+  /** Poll interval in seconds. */
+  pollSeconds?: number;
+  /** Injectable sleep, so tests do not wait in real time. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Where progress goes. Defaults to `console.log`. */
+  log?: (message: string) => void;
+  /**
+   * The whole database, used to count existing search indexes before creating one.
+   *
+   * Optional: without it the budget preflight is skipped and Atlas's own (less
+   * specific) error surfaces instead. The notebooks always pass it.
+   */
+  db?: SearchIndexDatabase;
+  /** Search index ceiling to enforce. Defaults to the M0 limit of three. */
+  indexLimit?: number;
+}
+
+/** Minimal surface of a driver `Db`, so the unit tests can pass a fake. */
+export interface SearchIndexDatabase {
+  listCollections(): { toArray(): Promise<Array<{ name: string }>> };
+  collection(name: string): SearchIndexCollection;
+}
+
+/**
+ * Every Atlas Search index in the database, as `{ collection, index }` pairs.
+ *
+ * Counts *Atlas* indexes, not Mastra logical ones: a bring-your-own registration adds a
+ * logical index without adding an Atlas index, and it is the Atlas count the cluster
+ * limit applies to.
+ */
+export async function listAllSearchIndexes(
+  db: SearchIndexDatabase,
+): Promise<Array<{ collection: string; index: string }>> {
+  const found: Array<{ collection: string; index: string }> = [];
+  for (const { name } of await db.listCollections().toArray()) {
+    const indexes = (await db
+      .collection(name)
+      .listSearchIndexes()
+      .toArray()
+      .catch(() => [])) as SearchIndexInfo[];
+    for (const index of indexes) found.push({ collection: name, index: index.name });
+  }
+  return found;
+}
+
+/**
+ * Throw `SearchIndexBudgetExceeded` if creating `wanted` would exceed the limit.
+ *
+ * Called only when `wanted` does not already exist, so an index that is already there
+ * never trips this.
+ */
+async function assertRoomForIndex(
+  wanted: string,
+  opts: EnsureIndexOptions,
+): Promise<void> {
+  if (!opts.db) return;
+  const limit = opts.indexLimit ?? M0_SEARCH_INDEX_LIMIT;
+  const existing = await listAllSearchIndexes(opts.db);
+  if (existing.length >= limit) throw new SearchIndexBudgetExceeded(wanted, existing, limit);
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Block until `indexName` reports `queryable`, or throw once the timeout elapses.
+ *
+ * Atlas builds search indexes asynchronously (PENDING -> BUILDING -> READY) and querying
+ * one that is not yet queryable is an error, so creation is only half the job.
+ */
+async function waitUntilQueryable(
+  collection: SearchIndexCollection,
+  indexName: string,
+  opts: EnsureIndexOptions,
+): Promise<void> {
+  const timeoutSeconds = opts.timeoutSeconds ?? 420;
+  const pollSeconds = opts.pollSeconds ?? 5;
+  const sleep = opts.sleep ?? defaultSleep;
+  const log = opts.log ?? console.log;
+  const attempts = Math.max(1, Math.ceil(timeoutSeconds / pollSeconds));
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    const found = (await collection.listSearchIndexes(indexName).toArray()) as SearchIndexInfo[];
+    const status = found[0];
+    if (status?.queryable) {
+      log(`  ${indexName} is queryable after ~${attempt * pollSeconds}s.`);
+      return;
+    }
+    await sleep(pollSeconds * 1000);
+  }
+  throw new Error(
+    `${indexName} did not become queryable within ${timeoutSeconds}s. ` +
+      `Check the index status in the Atlas UI -- on a free M0 cluster a build can be slow, ` +
+      `and hitting the three-index limit surfaces here rather than at creation.`,
+  );
+}
+
+/**
+ * The scratch collection notebook 02 creates for its bring-your-own walkthrough.
+ *
+ * Named for the cookbook rather than for the data, because this collection is created and
+ * dropped by a notebook. An earlier version used `movie_reviews`, which is a plausible
+ * name for a collection a reader already has -- and dropping it would have destroyed real
+ * data. Nothing here touches a collection whose name it did not choose.
+ */
+export const REVIEWS_COLLECTION = 'mastra_cookbook_reviews';
+
+/** Raised when a scratch collection already exists and is therefore not ours to reuse. */
+export class ScratchCollectionExists extends Error {
+  constructor(name: string) {
+    super(
+      `"${name}" already exists on this cluster. This notebook creates that collection ` +
+        `and drops it during cleanup, so it will not reuse or overwrite one it did not ` +
+        `create -- the contents might be yours.\n\n` +
+        `If it is a leftover from an interrupted run of this notebook, drop it (and any ` +
+        `search index on it) and re-run. If it is your data, set MASTRA_REVIEWS_COLLECTION ` +
+        `in the repository .env to a name this notebook can own.`,
+    );
+    this.name = 'ScratchCollectionExists';
+  }
+}
+
+/**
+ * Claim `name` as a scratch collection this run owns, or throw if it already exists.
+ *
+ * The return value is the name, so callers can use it inline. Pairing this with a drop at
+ * the end of the notebook is what makes a run idempotent *without* an unconditional drop
+ * at the start -- the destructive step only ever runs against a collection we just made.
+ */
+export async function claimScratchCollection(
+  db: SearchIndexDatabase,
+  name: string = REVIEWS_COLLECTION,
+): Promise<string> {
+  const existing = await db.listCollections().toArray();
+  if (existing.some((collection) => collection.name === name)) {
+    throw new ScratchCollectionExists(name);
+  }
+  return name;
+}
+
+/**
+ * Ensure a vector search index exists on `collection`, creating it if it does not.
+ *
+ * Returns the index name either way, so callers can pass it straight to
+ * `searchIndexName`. Existing indexes are left exactly as they are: we do not compare
+ * definitions and do not attempt to update, because the common case is an index some
+ * other notebook (or the Atlas UI) created with a compatible definition, and silently
+ * rebuilding someone else's index would be a worse surprise than a mismatch.
+ */
+export async function ensureVectorSearchIndex(
+  collection: SearchIndexCollection,
+  params: {
+    indexName: string;
+    path: string;
+    dimensions: number;
+    similarity?: 'cosine' | 'euclidean' | 'dotProduct';
+    filterPaths?: string[];
+  },
+  opts: EnsureIndexOptions = {},
+): Promise<string> {
+  const log = opts.log ?? console.log;
+  const existing = (await collection.listSearchIndexes().toArray()) as SearchIndexInfo[];
+  if (existing.some((index) => index.name === params.indexName)) {
+    log(`  ${params.indexName} already exists.`);
+    return params.indexName;
+  }
+
+  await assertRoomForIndex(params.indexName, opts);
+  log(`  Creating ${params.indexName} (vectorSearch, ${params.dimensions}-d)...`);
+  await collection.createSearchIndex({
+    name: params.indexName,
+    type: 'vectorSearch',
+    definition: {
+      fields: [
+        {
+          type: 'vector',
+          path: params.path,
+          numDimensions: params.dimensions,
+          similarity: params.similarity ?? 'cosine',
+        },
+        ...(params.filterPaths ?? []).map((path) => ({ type: 'filter', path })),
+      ],
+    },
+  });
+  await waitUntilQueryable(collection, params.indexName, opts);
+  return params.indexName;
+}
+
+/**
+ * Ensure a full-text (`search`) index exists on `collection`, creating it if it does not.
+ *
+ * The definition mirrors what the LangChain set's `create_fulltext_search_index` produces
+ * for the same name: a static mapping over the given fields as `string`. Matching it
+ * matters -- both sets query the same index by name, so a divergent mapping would make
+ * results depend on which notebook happened to create it.
+ */
+export async function ensureFullTextSearchIndex(
+  collection: SearchIndexCollection,
+  params: { indexName: string; fields: string[] },
+  opts: EnsureIndexOptions = {},
+): Promise<string> {
+  const log = opts.log ?? console.log;
+  const existing = (await collection.listSearchIndexes().toArray()) as SearchIndexInfo[];
+  if (existing.some((index) => index.name === params.indexName)) {
+    log(`  ${params.indexName} already exists.`);
+    return params.indexName;
+  }
+
+  await assertRoomForIndex(params.indexName, opts);
+  log(`  Creating ${params.indexName} (search, fields: ${params.fields.join(', ')})...`);
+  await collection.createSearchIndex({
+    name: params.indexName,
+    type: 'search',
+    definition: {
+      mappings: {
+        dynamic: false,
+        fields: Object.fromEntries(params.fields.map((field) => [field, { type: 'string' }])),
+      },
+    },
+  });
+  await waitUntilQueryable(collection, params.indexName, opts);
+  return params.indexName;
+}
