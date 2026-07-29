@@ -43,9 +43,16 @@ Notebook 1 of Advanced RAG creates `movies_vector_index`, notebook 2 creates
 demo that it drops when it finishes. Each creation is guarded by an existence check, so
 re-running is free.
 
+At the limit they stop and list what is occupying the slots rather than freeing one: an
+index these notebooks did not create might be behind something you depend on, so asking
+for a fresh cluster is the safe failure. Notebook 3's scratch collection works the same
+way -- it refuses to reuse a collection it did not create, and
+`LANGCHAIN_AUTO_EMBED_COLLECTION` renames it if the default is taken on your cluster.
+
 The Mastra set uses the same two index names and also creates them if absent. The two sets
 are independent — run either first — and sharing the names is what keeps the pair inside the
 M0 budget. On a paid tier the limit is not binding.
 
-If you hit a "maximum number of indexes" error, look for leftovers from an interrupted run:
-the `auto_embed_demo` collection, or a demo index that outlived its notebook.
+If you hit an index limit, look for leftovers from an interrupted run: the
+`auto_embed_demo` collection, or a demo index that outlived its notebook. Both are safe
+for you to drop. No notebook here deletes a collection or an index it did not create.

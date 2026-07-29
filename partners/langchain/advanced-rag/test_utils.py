@@ -192,3 +192,136 @@ def test_atlas_rerank_top_n_zero_is_not_treated_as_all():
     ranked = utils.atlas_rerank("query", docs, api_key="k", top_n=0, poster=poster)
     assert ranked == []
     assert poster.calls[0]["json"]["top_k"] == 0
+
+
+# --------------------------------------------------------------------------
+# The two guards that keep a notebook from damaging a reader's cluster.
+# --------------------------------------------------------------------------
+class FakeDb:
+    """Minimal stand-in for a pymongo Database.
+
+    `layout` maps collection name -> list of search index names.
+    """
+
+    def __init__(self, layout):
+        self._layout = dict(layout)
+
+    def list_collection_names(self):
+        return list(self._layout)
+
+    def __getitem__(self, name):
+        indexes = self._layout.get(name, [])
+        return FakeCollection(indexes)
+
+
+class FakeCollection:
+    def __init__(self, index_names):
+        self._index_names = list(index_names)
+
+    def list_search_indexes(self):
+        return [{"name": n, "queryable": True} for n in self._index_names]
+
+
+def test_list_all_search_indexes_reports_collection_and_index():
+    db = FakeDb({"embedded_movies": ["movies_vector_index", "movies_fulltext_index"]})
+    assert utils.list_all_search_indexes(db) == [
+        ("embedded_movies", "movies_vector_index"),
+        ("embedded_movies", "movies_fulltext_index"),
+    ]
+
+
+def test_list_all_search_indexes_skips_collections_it_cannot_introspect():
+    # A view raises on list_search_indexes. That must not abort the whole count.
+    class Exploding(FakeDb):
+        def __getitem__(self, name):
+            if name == "a_view":
+                raise RuntimeError("cannot list indexes on a view")
+            return super().__getitem__(name)
+
+    db = Exploding({"a_view": [], "embedded_movies": ["movies_vector_index"]})
+    assert utils.list_all_search_indexes(db) == [("embedded_movies", "movies_vector_index")]
+
+
+def test_assert_room_for_index_allows_creation_below_the_limit():
+    db = FakeDb({"embedded_movies": ["movies_vector_index", "movies_fulltext_index"]})
+    utils.assert_room_for_index(db, "auto_vec")  # 2 of 3 -> fine
+
+
+def test_assert_room_for_index_refuses_at_the_limit():
+    db = FakeDb({"embedded_movies": ["a", "b"], "other": ["c"]})
+    with pytest.raises(utils.SearchIndexBudgetExceeded) as excinfo:
+        utils.assert_room_for_index(db, "auto_vec")
+    message = str(excinfo.value)
+    # The whole point: name what is using the slots and ask for a fresh cluster,
+    # rather than silently freeing one.
+    assert "auto_vec" in message
+    assert "embedded_movies: a" in message
+    assert "fresh Atlas cluster" in message
+    assert "will not delete indexes it did not create" in message
+
+
+def test_assert_room_for_index_honors_a_non_m0_limit():
+    db = FakeDb({"embedded_movies": ["a", "b", "c"]})
+    utils.assert_room_for_index(db, "auto_vec", limit=10)  # paid tier
+    with pytest.raises(utils.SearchIndexBudgetExceeded) as excinfo:
+        utils.assert_room_for_index(db, "auto_vec", limit=3)
+    # The M0 wording only appears when the limit really is the M0 one.
+    assert "free M0 tier" in str(excinfo.value)
+
+
+def test_claim_scratch_collection_returns_the_name_when_absent():
+    db = FakeDb({"embedded_movies": []})
+    assert utils.claim_scratch_collection(db, "auto_embed_demo") == "auto_embed_demo"
+
+
+def test_claim_scratch_collection_refuses_an_existing_collection():
+    # The bug this prevents: an unconditional drop() of a collection name a reader
+    # could plausibly already own, which would destroy their data.
+    db = FakeDb({"auto_embed_demo": []})
+    with pytest.raises(utils.ScratchCollectionExists) as excinfo:
+        utils.claim_scratch_collection(db, "auto_embed_demo")
+    message = str(excinfo.value)
+    assert "will not reuse or overwrite one it did not create" in message
+    assert "LANGCHAIN_AUTO_EMBED_COLLECTION" in message
+
+
+def test_claim_scratch_collection_names_a_custom_env_var():
+    db = FakeDb({"scratch": []})
+    with pytest.raises(utils.ScratchCollectionExists) as excinfo:
+        utils.claim_scratch_collection(db, "scratch", env_var="MY_OVERRIDE")
+    assert "MY_OVERRIDE" in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# setting(): a tunable the .env omits must NOT come from the ambient shell.
+# --------------------------------------------------------------------------
+def test_setting_reads_a_declared_value_from_the_env_file(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_MODEL=claude-sonnet-5\n")
+    monkeypatch.chdir(tmp_path)
+    assert utils.setting("ANTHROPIC_MODEL", "claude-haiku-4-5") == "claude-sonnet-5"
+
+
+def test_setting_ignores_the_shell_for_a_variable_the_env_omits(tmp_path, monkeypatch):
+    # The bug this prevents, seen for real: a model id left in a shell from unrelated
+    # work reached the gateway as DeploymentNotFound. load_dotenv only overlays the
+    # variables the file declares, so os.getenv would have returned the shell's value.
+    env = tmp_path / ".env"
+    env.write_text("MONGODB_URI=mongodb+srv://h/\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "global.anthropic.claude-opus-5")
+    assert utils.setting("ANTHROPIC_MODEL", "claude-haiku-4-5") == "claude-haiku-4-5"
+
+
+def test_setting_treats_a_declared_but_blank_value_as_absent(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    env.write_text("ANTHROPIC_MODEL=\n")
+    monkeypatch.chdir(tmp_path)
+    assert utils.setting("ANTHROPIC_MODEL", "claude-haiku-4-5") == "claude-haiku-4-5"
+
+
+def test_setting_falls_back_to_the_default_with_no_env_file(tmp_path, monkeypatch):
+    # Colab has no .env at all. The default must still win over the shell.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "from-the-shell")
+    assert utils.setting("ANTHROPIC_MODEL", "claude-haiku-4-5") == "claude-haiku-4-5"

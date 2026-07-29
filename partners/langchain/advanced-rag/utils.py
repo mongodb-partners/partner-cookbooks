@@ -50,6 +50,29 @@ def get_secret(name: str, prompt: Optional[str] = None) -> str:
 # --------------------------------------------------------------------------
 # LLM configuration: direct Anthropic API vs. an Anthropic-compatible gateway.
 # --------------------------------------------------------------------------
+def setting(name: str, default: str) -> str:
+    """Return a tunable from the .env file, or its documented default.
+
+    Deliberately NOT `os.getenv(name, default)`. `load_dotenv` only overlays the
+    variables the file declares, so anything it omits keeps whatever the surrounding
+    shell holds. An `ANTHROPIC_MODEL` left in a shell by unrelated work then silently
+    becomes the model a notebook uses, and the resulting `DeploymentNotFound` points
+    nowhere near the cause. That happened during development, which is why this exists.
+
+    This reads the .env file directly rather than the process environment, so an omitted
+    variable means "use the documented default", not "use whatever the shell has".
+    Required *secrets* still fall back to the shell via `get_secret`, because Colab and
+    CI legitimately have no .env file.
+    """
+    from dotenv import dotenv_values, find_dotenv
+
+    path = find_dotenv(usecwd=True)
+    if not path:
+        return default
+    value = (dotenv_values(path).get(name) or "").strip()
+    return value or default
+
+
 def _strip_messages_path(base_url: str) -> str:
     """Drop a trailing /v1/messages from a gateway URL.
 
@@ -213,3 +236,85 @@ def connect(uri: str, *, appname: str = APPNAME):  # pragma: no cover - needs li
     client = MongoClient(uri, appname=appname, serverSelectionTimeoutMS=20000)
     client.admin.command("ping")
     return client
+
+
+# --------------------------------------------------------------------------
+# Guards for the two destructive things a notebook could otherwise do to a
+# reader's cluster: exceed the search index budget, and reuse a collection it
+# did not create.
+# --------------------------------------------------------------------------
+#: Atlas Search index limit on the free M0 tier. Paid tiers allow more.
+M0_SEARCH_INDEX_LIMIT = 3
+
+
+class SearchIndexBudgetExceeded(RuntimeError):
+    """Raised when creating an index would exceed the cluster's search index limit.
+
+    Deliberately stops rather than freeing a slot. An index these notebooks did
+    not create belongs to the reader and might be behind a running application,
+    so asking for a fresh cluster is the safe failure.
+    """
+
+    def __init__(self, wanted: str, existing: List[tuple], limit: int):
+        inventory = "\n".join(f"  {coll}: {idx}" for coll, idx in existing)
+        tier = " on a free M0 tier" if limit == M0_SEARCH_INDEX_LIMIT else ""
+        super().__init__(
+            f'Cannot create "{wanted}": this cluster already has {len(existing)} Atlas '
+            f"Search index(es), which is the limit{tier}:\n{inventory}\n\n"
+            "Use a fresh Atlas cluster, upgrade the tier, or drop an index you no longer "
+            "need from the Atlas UI. This notebook will not delete indexes it did not "
+            "create.\nIf a previous run of this cookbook was interrupted, the leftover is "
+            "most likely an index on a scratch collection (an 'auto_embed_demo' or "
+            "'mastra_cookbook_*' collection) -- those are safe for you to remove."
+        )
+
+
+def list_all_search_indexes(db) -> List[tuple]:  # pragma: no cover - needs live Atlas
+    """Every Atlas Search index in the database, as (collection, index) pairs."""
+    found = []
+    for name in db.list_collection_names():
+        try:
+            indexes = list(db[name].list_search_indexes())
+        except Exception:
+            continue  # a view, or a collection we cannot introspect
+        found.extend((name, ix["name"]) for ix in indexes)
+    return found
+
+
+def assert_room_for_index(db, wanted: str, limit: int = M0_SEARCH_INDEX_LIMIT) -> None:
+    """Raise SearchIndexBudgetExceeded if creating `wanted` would exceed `limit`.
+
+    Call this only when `wanted` does not already exist, so an index that is
+    already there never trips it.
+    """
+    existing = list_all_search_indexes(db)
+    if len(existing) >= limit:
+        raise SearchIndexBudgetExceeded(wanted, existing, limit)
+
+
+class ScratchCollectionExists(RuntimeError):
+    """Raised when a scratch collection already exists and is not ours to reuse."""
+
+    def __init__(self, name: str, env_var: str):
+        super().__init__(
+            f'"{name}" already exists on this cluster. This notebook creates that '
+            "collection and drops it during housekeeping, so it will not reuse or "
+            "overwrite one it did not create -- the contents might be yours.\n\n"
+            "If it is a leftover from an interrupted run of this notebook, drop it (and "
+            f"any search index on it) and re-run. If it is your data, set {env_var} in "
+            "the repository .env to a name this notebook can own."
+        )
+
+
+def claim_scratch_collection(
+    db, name: str, *, env_var: str = "LANGCHAIN_AUTO_EMBED_COLLECTION"
+) -> str:
+    """Claim `name` as a scratch collection this run owns, or raise if it exists.
+
+    Pairing this with a drop at the end is what makes a run idempotent *without*
+    an unconditional drop at the start: the destructive step is then only ever
+    reachable for a collection we just created.
+    """
+    if name in db.list_collection_names():
+        raise ScratchCollectionExists(name, env_var)
+    return name

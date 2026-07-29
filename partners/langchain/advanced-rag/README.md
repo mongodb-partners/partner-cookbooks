@@ -35,16 +35,34 @@ Query embeddings use the same model so they share the vector space.
 
 M0 clusters allow up to **3 search indexes**. These notebooks create two on `embedded_movies`
 (vector and full-text) and one short-lived index for the auto-embedding demo, which notebook 3
-drops when it finishes. If you hit a "maximum number of indexes" error, drop the `auto_embed_demo`
+drops when it finishes. At the limit the notebooks stop and name what is using the slots rather than
+freeing one. If you hit it, drop the `auto_embed_demo`
 collection or any leftover demo indexes from a previous run.
 
 ## Shared helpers
 
 `utils.py` holds the setup boilerplate the notebooks share: reading secrets, connecting to Atlas,
-calling the embedding and rerank endpoints, and configuring the LLM. The teaching code stays in the
-notebooks. `test_utils.py` covers the helpers with fast, offline unit tests:
+calling the embedding and rerank endpoints, configuring the LLM, and the two guards described above
+(`assert_room_for_index`, `claim_scratch_collection`). The teaching code stays in the notebooks.
+`test_utils.py` covers the helpers with 28 fast, offline unit tests:
 
 ```bash
 cd partners/langchain/advanced-rag
 python -m pytest test_utils.py -v
 ```
+
+### Secrets vs. tunables
+
+Two helpers read configuration, and the difference matters:
+
+- `get_secret(name, prompt)` — a required credential. Checks the environment, then prompts
+  interactively. The environment fallback is what makes Colab and CI work without a `.env`.
+- `setting(name, default)` — a tunable such as `ANTHROPIC_MODEL` or `EMBEDDING_DIMENSIONS`. Reads
+  the `.env` file *directly* and otherwise returns the documented default. It never consults the
+  surrounding shell.
+
+That second one is deliberate, not fussiness. `load_dotenv` only overlays the variables the file
+declares, so anything it omits keeps whatever the shell holds — an `ANTHROPIC_MODEL` left in a
+shell by unrelated work silently became the model a notebook used, and the resulting
+`DeploymentNotFound` pointed nowhere near the cause. An omitted variable means "use the documented
+default". The Mastra set's `src/config.ts` makes the same distinction for the same reason.
