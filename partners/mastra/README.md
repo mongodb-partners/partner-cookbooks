@@ -64,6 +64,29 @@ depend on at least one of them: even notebook 01 reaches `sample_mflix` through 
 bring-your-own registration. Install `latest` and they fail on a missing method. When BYO
 and hybrid search reach a stable release, this pin should move.
 
+## Two dependency advisories we do not fix
+
+`npm install` reports advisories that cannot be cleared without breaking something. Both are
+left in place deliberately.
+
+**`brace-expansion` (high, GHSA-mh99-v99m-4gvg).** Patched only in 5.0.8, and 5.x replaced the
+default export with a named `{ expand }`. The copy here is 1.1.16, reached through
+`tslab -> @rollup/plugin-commonjs -> glob -> minimatch`, and `minimatch@3` calls the bare
+export. Overriding it to 5.0.8 makes `minimatch` throw `expand is not a function`, which takes
+out the Jupyter kernel and with it all four notebooks. The chain is `devDependencies`-only and
+is reached by tslab's build tooling, not by notebook code, so no untrusted input flows into
+it here. It clears when tslab updates its rollup plugin.
+
+**`@ai-sdk/provider-utils` (low, GHSA-866g-f22w-33x8).** No patched version exists: the
+advisory covers `<= 3.0.97` and 3.0.30 is the newest 3.x published. `@mastra/core` pins it by
+alias as `@ai-sdk/provider-utils-v5: npm:@ai-sdk/provider-utils@3.0.30`, so an override on the
+plain name does not reach it. Waiting on upstream.
+
+Two others are fixed by the `overrides` block in `package.json` rather than by upgrading the
+parent: `sharp` to 0.35.3 and `adm-zip` to 0.6.0. `@huggingface/transformers` and
+`onnxruntime-node` still declare the vulnerable ranges, and both packages load and run
+correctly against the overridden versions.
+
 ## The M0 index budget
 
 A free cluster allows **three** Atlas Search indexes, and this set spends all three.

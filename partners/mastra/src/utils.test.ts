@@ -348,6 +348,17 @@ describe('package.json dependencies', () => {
     // bring-your-own-collection support. `latest` is 1.14.0 and lacks all three.
     expect(pkg.dependencies['@mastra/mongodb']).toBe('1.15.0-alpha.1');
   });
+
+  // Both parents still declare the vulnerable range, so the fix is an override
+  // rather than a version bump. Dropping either re-opens a high-severity alert:
+  // sharp <0.35.0 inherits four libvips CVEs, and adm-zip <0.6.0 will allocate
+  // 4GB from a crafted ZIP header.
+  it.each([
+    ['sharp', '0.35.3'],
+    ['adm-zip', '0.6.0'],
+  ])('keeps the %s override that patches a transitive advisory', (dep, version) => {
+    expect(pkg.overrides?.[dep]).toBe(version);
+  });
 });
 
 // --------------------------------------------------------------------------

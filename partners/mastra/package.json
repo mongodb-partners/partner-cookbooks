@@ -28,6 +28,10 @@
     "tslab": "1.0.22",
     "tsx": "4.20.6",
     "typescript": "5.9.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.6"
+  },
+  "overrides": {
+    "sharp": "0.35.3",
+    "adm-zip": "0.6.0"
   }
 }

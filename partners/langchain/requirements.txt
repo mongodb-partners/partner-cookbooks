@@ -12,5 +12,5 @@ python-dotenv==1.2.2
 requests==2.34.2
 
 # Local development / testing only (not needed to run the notebooks):
-jupyterlab==4.6.1
+jupyterlab==4.6.2
 pytest==9.1.1
