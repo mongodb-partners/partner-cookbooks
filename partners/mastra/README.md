@@ -55,14 +55,17 @@ jupyter lab
 
 Then pick the **TypeScript** kernel when you open a notebook.
 
-## A note on the alpha dependency
+## A note on the version pin
 
-`package.json` pins `@mastra/mongodb` to **1.15.0-alpha.1**, not `latest`. Three of the
-things these notebooks teach, bring-your-own collections, `textQuery`, and `hybridQuery`,
-do not exist in 1.14.0, which is what `latest` currently resolves to. All four notebooks
-depend on at least one of them: even notebook 01 reaches `sample_mflix` through a
-bring-your-own registration. Install `latest` and they fail on a missing method. When BYO
-and hybrid search reach a stable release, this pin should move.
+`package.json` pins `@mastra/mongodb` to **1.15.0**. Three of the things these notebooks
+teach, bring-your-own collections, `textQuery`, and `hybridQuery`, do not exist in 1.14.0.
+All four notebooks depend on at least one of them: even notebook 01 reaches `sample_mflix`
+through a bring-your-own registration. Downgrade below 1.15.0 and they fail on a missing
+method.
+
+This set was originally written against `1.15.0-alpha.1`, which was the only version with
+those three features at the time. 1.15.0 shipped stable on 2026-07-28 and the pin moved off
+the prerelease.
 
 ## Two dependency advisories we do not fix
 

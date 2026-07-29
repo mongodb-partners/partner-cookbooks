@@ -16,7 +16,7 @@
     "@huggingface/transformers": "3.8.1",
     "@mastra/core": "1.53.0",
     "@mastra/memory": "1.23.1",
-    "@mastra/mongodb": "1.15.0-alpha.1",
+    "@mastra/mongodb": "1.15.0",
     "@mastra/voyageai": "0.4.0",
     "mongodb": "6.21.0",
     "onnxruntime-node": "1.27.0",

@@ -343,10 +343,12 @@ describe('package.json dependencies', () => {
     },
   );
 
-  it('pins @mastra/mongodb to the version that has hybrid search and BYO collections', () => {
-    // 1.15.0-alpha.1 is the only published version with hybridQuery/textQuery and
-    // bring-your-own-collection support. `latest` is 1.14.0 and lacks all three.
-    expect(pkg.dependencies['@mastra/mongodb']).toBe('1.15.0-alpha.1');
+  it('pins @mastra/mongodb to a version that has hybrid search and BYO collections', () => {
+    // hybridQuery, textQuery, and bring-your-own-collection support landed in
+    // 1.15.0. They do not exist in 1.14.0, so this must never float below it.
+    const pinned = pkg.dependencies['@mastra/mongodb'];
+    expect(pinned).toBe('1.15.0');
+    expect(pinned).not.toMatch(/-alpha|-beta|-rc/);
   });
 
   // Both parents still declare the vulnerable range, so the fix is an override
