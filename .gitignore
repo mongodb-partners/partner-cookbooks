@@ -1,9 +1,11 @@
 docs/superpowers/specs/
 **/LIVE_DEMO_GUIDE.md
 **/_build_nb*.py
+**/_cells_*.py
 .env
 .venv/
 .ipynb_checkpoints/
-__pycache__/
+**/__pycache__/
 *.pyc
+node_modules/
 .DS_Store
