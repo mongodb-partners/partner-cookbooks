@@ -655,18 +655,25 @@ describe('package.json dependencies', () => {
   it('pins @mastra/mongodb to a version that has hybrid search and BYO collections', () => {
     // hybridQuery, textQuery, and bring-your-own-collection support landed in
     // 1.15.0. They do not exist in 1.14.0, so this must never float below it.
-    const pinned = pkg.dependencies['@mastra/mongodb'];
-    expect(pinned).toBe('1.15.0');
-    expect(pinned).not.toMatch(/-alpha|-beta|-rc/);
+    const pinned: string = pkg.dependencies['@mastra/mongodb'];
+    expect(pinned).toMatch(/^\d+\.\d+\.\d+$/);
+    const [major, minor] = pinned.split('.').map(Number);
+    expect(major === 1 && minor! >= 15).toBe(true);
+  });
+
+  it('runs typecheck with the pinned TypeScript, not the copy tslab bundles', () => {
+    // @tslab/typescript-for-tslab ships its own `tsc` bin and wins the
+    // node_modules/.bin link, so a bare `tsc` silently checks with TypeScript 5.0.4.
+    expect(pkg.scripts.typecheck).toContain('node_modules/typescript/bin/tsc');
   });
 
   // Both parents still declare the vulnerable range, so the fix is an override
-  // rather than a version bump. Dropping either re-opens a high-severity alert:
-  // sharp <0.35.0 inherits four libvips CVEs, and adm-zip <0.6.0 will allocate
-  // 4GB from a crafted ZIP header.
+  // rather than a version bump. Dropping either re-opens high-severity alerts:
+  // sharp <0.35.4 bundles a vulnerable libheif, and adm-zip <0.6.1 follows
+  // destination symlinks and keeps SUID bits when extracting an untrusted ZIP.
   it.each([
-    ['sharp', '0.35.3'],
-    ['adm-zip', '0.6.0'],
+    ['sharp', '0.35.5'],
+    ['adm-zip', '0.6.1'],
   ])('keeps the %s override that patches a transitive advisory', (dep, version) => {
     expect(pkg.overrides?.[dep]).toBe(version);
   });

@@ -35,7 +35,7 @@ before running anything yourself.
 - A MongoDB Atlas cluster with the **`sample_mflix` sample dataset** loaded. M0 works, with
   one caveat about the index budget below.
 - **MongoDB 8.0 or later.** `$rankFusion` in notebook 03 needs it.
-- **Node.js 20+.**
+- **Node.js 22.13 or later.** The Mastra packages and `@ai-sdk/anthropic` require it.
 - An **Atlas API key**, used for the hosted Voyage embedding and rerank endpoints at
   `ai.mongodb.com`.
 - A **Claude API key**, or an Anthropic-compatible gateway via `ANTHROPIC_BASE_URL`. Only
@@ -60,36 +60,29 @@ Then pick the **TypeScript** kernel when you open a notebook.
 
 ## A note on the version pin
 
-`package.json` pins `@mastra/mongodb` to **1.15.0**. Three of the things these notebooks
-teach, bring-your-own collections, `textQuery`, and `hybridQuery`, do not exist in 1.14.0.
-All four notebooks depend on at least one of them: even notebook 01 reaches `sample_mflix`
-through a bring-your-own registration. Downgrade below 1.15.0 and they fail on a missing
-method.
+`package.json` pins `@mastra/mongodb` to **1.23.0**, and it must never drop below **1.15.0**.
+Three of the things these notebooks teach, bring-your-own collections, `textQuery`, and
+`hybridQuery`, do not exist in 1.14.0. All four notebooks depend on at least one of them:
+even notebook 01 reaches `sample_mflix` through a bring-your-own registration. Downgrade
+below 1.15.0 and they fail on a missing method.
 
 This set was originally written against `1.15.0-alpha.1`, which was the only version with
 those three features at the time. 1.15.0 shipped stable on 2026-07-28 and the pin moved off
-the prerelease.
+the prerelease. It moved again, to 1.23.0, on 2026-10-14, when every dependency was brought
+to its latest release and all four notebooks were re-run against it.
 
-## Two dependency advisories we do not fix
+## The one dependency advisory we do not fix
 
-`npm install` reports advisories that cannot be cleared without breaking something. Both are
-left in place deliberately.
-
-**`brace-expansion` (high, GHSA-mh99-v99m-4gvg).** Patched only in 5.0.8, and 5.x replaced the
-default export with a named `{ expand }`. The copy here is 1.1.16, reached through
-`tslab -> @rollup/plugin-commonjs -> glob -> minimatch`, and `minimatch@3` calls the bare
-export. Overriding it to 5.0.8 makes `minimatch` throw `expand is not a function`, which takes
-out the Jupyter kernel and with it all four notebooks. The chain is `devDependencies`-only and
-is reached by tslab's build tooling, not by notebook code, so no untrusted input flows into
-it here. It clears when tslab updates its rollup plugin.
-
-**`@ai-sdk/provider-utils` (low, GHSA-866g-f22w-33x8).** No patched version exists: the
-advisory covers `<= 3.0.97` and 3.0.30 is the newest 3.x published. `@mastra/core` pins it by
-alias as `@ai-sdk/provider-utils-v5: npm:@ai-sdk/provider-utils@3.0.30`, so an override on the
-plain name does not reach it. Waiting on upstream.
+**`sprintf-js` (moderate, GHSA-hp3w-g68c-fv3c).** No patched version exists: the advisory
+covers every release through 1.1.3, the newest published. Two copies arrive transitively,
+1.0.3 through `@mastra/core -> gray-matter -> js-yaml@3 -> argparse@1` and 1.1.3 through
+`@huggingface/transformers -> onnxruntime-node -> global-agent -> roarr`. The bug is a
+denial of service through an attacker-chosen format string, and neither path lets one in.
+`argparse` is loaded only by js-yaml's command-line tool, which gray-matter never runs, and
+roarr only ever formats global-agent's own constant log messages. Waiting on upstream.
 
 Two others are fixed by the `overrides` block in `package.json` rather than by upgrading the
-parent: `sharp` to 0.35.3 and `adm-zip` to 0.6.0. `@huggingface/transformers` and
+parent: `sharp` to 0.35.5 and `adm-zip` to 0.6.1. `@huggingface/transformers` and
 `onnxruntime-node` still declare the vulnerable ranges, and both packages load and run
 correctly against the overridden versions.
 
@@ -148,7 +141,7 @@ notebooks where you can read it.
 ## Verifying it
 
 ```bash
-npm test            # 84 offline unit tests, plus a credential scan of every notebook output
+npm test            # 85 offline unit tests, plus a credential scan of every notebook output
 npm run typecheck   # tsc --noEmit over src/ and scripts/
 npm run smoke       # 8 steps against real Atlas, real Voyage, real Claude
 ```

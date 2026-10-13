@@ -99,14 +99,15 @@ def build_llm_kwargs(
 
     Direct Anthropic API: pass the key through as usual.
     Gateway (e.g. Azure API Management fronting Grove): the SDK's default
-    `x-api-key` header is rejected, so we send an `api-key` header instead and
+    `x-api-key` header is rejected, so we also send an `api-key` header and
     normalise the base URL to the API root.
     """
     kwargs: dict[str, Any] = {"model": model, "max_tokens": max_tokens}
     if base_url:
         kwargs["base_url"] = _strip_messages_path(base_url)
-        # A placeholder keeps the SDK happy; real auth rides in default_headers.
-        kwargs["api_key"] = "placeholder"
+        # The SDK always sends api_key as x-api-key. Gateways that read that header
+        # first reject a placeholder, so it carries the real key as well.
+        kwargs["api_key"] = api_key
         kwargs["default_headers"] = {
             "api-key": api_key,
             "anthropic-version": ANTHROPIC_VERSION,

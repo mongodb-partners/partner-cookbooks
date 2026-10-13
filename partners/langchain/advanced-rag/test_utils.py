@@ -55,6 +55,15 @@ def test_build_llm_kwargs_gateway_strips_messages_path_and_sets_header():
     assert kw["default_headers"]["anthropic-version"]
 
 
+def test_build_llm_kwargs_gateway_never_sends_a_placeholder_x_api_key():
+    # The SDK always turns api_key into an x-api-key header. A gateway that reads
+    # x-api-key before api-key 401s on a placeholder there, so it must carry the
+    # real key too.
+    kw = utils.build_llm_kwargs(api_key="gw-key", model="m",
+                                base_url="https://gw.example.net/anthropic", max_tokens=1)
+    assert kw["api_key"] == "gw-key"
+
+
 def test_build_llm_kwargs_gateway_root_url_untouched():
     kw = utils.build_llm_kwargs(api_key="gw-key", model="m",
                                 base_url="https://gw.example.net/anthropic", max_tokens=1)
