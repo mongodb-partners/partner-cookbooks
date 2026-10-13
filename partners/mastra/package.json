@@ -9,7 +9,8 @@
     "test:unit": "vitest run",
     "typecheck": "node node_modules/typescript/bin/tsc --noEmit",
     "smoke": "tsx scripts/smoke.ts",
-    "check:outputs": "tsx scripts/check-notebook-outputs.ts"
+    "check:outputs": "tsx scripts/check-notebook-outputs.ts",
+    "postinstall": "node scripts/prefetch-tokenizer.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.79",

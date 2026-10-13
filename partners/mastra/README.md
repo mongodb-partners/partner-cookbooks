@@ -58,6 +58,13 @@ jupyter lab
 
 Then pick the **TypeScript** kernel when you open a notebook.
 
+`npm install` also downloads the `voyage-3-large` tokenizer from Hugging Face, through a
+`postinstall` step. `voyageEmbedding()` needs it, and if the first download instead happens
+inside the kernel, the file write trips tslab: the next cell, and every cell after it, fails
+with `Unexpected pending rebuildTimer`. If the install could not reach Hugging Face, it
+prints a warning and carries on; re-run `node scripts/prefetch-tokenizer.mjs` once you are
+back online, or restart the kernel once after the first embedding cell.
+
 ## A note on the version pin
 
 `package.json` pins `@mastra/mongodb` to **1.23.0**, and it must never drop below **1.15.0**.
@@ -141,7 +148,7 @@ notebooks where you can read it.
 ## Verifying it
 
 ```bash
-npm test            # 85 offline unit tests, plus a credential scan of every notebook output
+npm test            # 86 offline unit tests, plus a credential scan of every notebook output
 npm run typecheck   # tsc --noEmit over src/ and scripts/
 npm run smoke       # 8 steps against real Atlas, real Voyage, real Claude
 ```

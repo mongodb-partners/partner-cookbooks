@@ -661,6 +661,16 @@ describe('package.json dependencies', () => {
     expect(major === 1 && minor! >= 15).toBe(true);
   });
 
+  it('prefetches the voyage-3-large tokenizer at install time', () => {
+    // voyageEmbedding() downloads its tokenizer into node_modules on first use. That
+    // write wakes tslab's TypeScript file watcher, and every later cell then fails
+    // with "Unexpected pending rebuildTimer" until the kernel restarts. Fetching it
+    // during install means a fresh clone never writes there from inside the kernel.
+    expect(pkg.scripts.postinstall).toBe('node scripts/prefetch-tokenizer.mjs');
+    const script = readFileSync(new URL('../scripts/prefetch-tokenizer.mjs', import.meta.url), 'utf8');
+    expect(script).toContain("'voyage-3-large'");
+  });
+
   it('runs typecheck with the pinned TypeScript, not the copy tslab bundles', () => {
     // @tslab/typescript-for-tslab ships its own `tsc` bin and wins the
     // node_modules/.bin link, so a bare `tsc` silently checks with TypeScript 5.0.4.
